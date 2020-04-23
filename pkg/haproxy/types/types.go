@@ -49,6 +49,7 @@ type Global struct {
 	ModSecurity     ModSecurityConfig
 	Cookie          CookieConfig
 	DrainSupport    DrainConfig
+	Acme            Acme
 	ForwardFor      string
 	LoadServerState bool
 	AdminSocket     string
@@ -274,6 +275,7 @@ type Frontend struct {
 	BindSocket  string
 	BindID      int
 	AcceptProxy bool
+	DefaultCert string
 }
 
 // Hosts ...
