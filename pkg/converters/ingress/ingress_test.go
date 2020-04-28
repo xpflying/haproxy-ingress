@@ -1107,6 +1107,7 @@ type testConfig struct {
 	hconfig haproxy.Config
 	logger  *types_helper.LoggerMock
 	cache   *conv_helper.CacheMock
+	tracker *conv_helper.TrackerMock
 	updater *updaterMock
 }
 
@@ -1118,6 +1119,7 @@ func setup(t *testing.T) *testConfig {
 		hconfig: haproxy.CreateInstance(logger, haproxy.InstanceOptions{}).Config(),
 		cache:   conv_helper.NewCacheMock(),
 		logger:  logger,
+		tracker: conv_helper.NewTrackerMock(),
 	}
 	c.createSvc1("system/default", "8080", "172.17.0.99")
 	return c
@@ -1138,6 +1140,8 @@ var defaultBackendConfig = `
     port: 8080`
 
 func (c *testConfig) SyncDef(config map[string]string, ing ...*extensions.Ingress) {
+	c.cache.IngList = ing
+	c.cache.GlobalCfg = config
 	defaultConfig := func() map[string]string {
 		return map[string]string{
 			ingtypes.BackInitialWeight: "100",
@@ -1147,6 +1151,7 @@ func (c *testConfig) SyncDef(config map[string]string, ing ...*extensions.Ingres
 		&ingtypes.ConverterOptions{
 			Cache:          c.cache,
 			Logger:         c.logger,
+			Tracker:        c.tracker,
 			DefaultConfig:  defaultConfig,
 			DefaultBackend: "system/default",
 			DefaultSSLFile: convtypes.CrtFile{
@@ -1158,10 +1163,9 @@ func (c *testConfig) SyncDef(config map[string]string, ing ...*extensions.Ingres
 			AnnotationPrefix: "ingress.kubernetes.io",
 		},
 		c.hconfig,
-		config,
 	).(*converter)
 	conv.updater = c.updater
-	conv.Sync(ing)
+	conv.Sync()
 }
 
 func (c *testConfig) createSvc1Auto() (*api.Service, *api.Endpoints) {

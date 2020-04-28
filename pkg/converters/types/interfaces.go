@@ -20,10 +20,15 @@ import (
 	"time"
 
 	api "k8s.io/api/core/v1"
+	extensions "k8s.io/api/extensions/v1beta1"
+
+	hatypes "github.com/jcmoraisjr/haproxy-ingress/pkg/haproxy/types"
 )
 
 // Cache ...
 type Cache interface {
+	GetIngress(ingressName string) (*extensions.Ingress, error)
+	GetIngressList() ([]*extensions.Ingress, error)
 	GetService(serviceName string) (*api.Service, error)
 	GetEndpoints(service *api.Service) (*api.Endpoints, error)
 	GetTerminatingPods(service *api.Service) ([]*api.Pod, error)
@@ -32,6 +37,25 @@ type Cache interface {
 	GetCASecretPath(defaultNamespace, secretName string) (ca, crl File, err error)
 	GetDHSecretPath(defaultNamespace, secretName string) (File, error)
 	GetSecretContent(defaultNamespace, secretName, keyName string) ([]byte, error)
+	//
+	NeedResync() bool
+	GlobalConfig() (cur, new map[string]string)
+	GetDirtyIngresses() (del, upd, add []*extensions.Ingress)
+	GetDirtyEndpoints() []*api.Endpoints
+	GetDirtyServices() (del, upd, add []*api.Service)
+	GetDirtySecrets() (del, upd, add []*api.Secret)
+	GetDirtyPods() []*api.Pod
+	SyncNewObjects()
+}
+
+// Tracker ...
+type Tracker interface {
+	TrackHostname(rtype ResourceType, name, hostname string)
+	TrackBackend(rtype ResourceType, name string, backendID hatypes.BackendID)
+	TrackMissingOnHostname(rtype ResourceType, name, hostname string)
+	GetDirtyLinks(oldIngressList, oldServiceList, addServiceList, oldSecretList, addSecretList []string) (dirtyIngs, dirtyHosts []string, dirtyBacks []hatypes.BackendID)
+	DeleteHostnames(hostnames []string)
+	DeleteBackends(backends []hatypes.BackendID)
 }
 
 // File ...
@@ -47,3 +71,17 @@ type CrtFile struct {
 	CommonName string
 	NotAfter   time.Time
 }
+
+// ResourceType ...
+type ResourceType int
+
+const (
+	// IngressType ...
+	IngressType ResourceType = iota
+
+	// ServiceType ...
+	ServiceType
+
+	// SecretType ...
+	SecretType
+)

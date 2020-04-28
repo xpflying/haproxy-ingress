@@ -40,6 +40,7 @@ type Config interface {
 	Hosts() *hatypes.Hosts
 	Backends() *hatypes.Backends
 	Userlists() []*hatypes.Userlist
+	Clear()
 	Equals(other Config) bool
 }
 
@@ -371,6 +372,10 @@ func (c *config) Backends() *hatypes.Backends {
 
 func (c *config) Userlists() []*hatypes.Userlist {
 	return c.userlists
+}
+
+func (c *config) Clear() {
+	// IMPLEMENT
 }
 
 func (c *config) Equals(other Config) bool {

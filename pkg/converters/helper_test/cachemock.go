@@ -23,6 +23,7 @@ import (
 	"time"
 
 	api "k8s.io/api/core/v1"
+	extensions "k8s.io/api/extensions/v1beta1"
 
 	convtypes "github.com/jcmoraisjr/haproxy-ingress/pkg/converters/types"
 )
@@ -32,6 +33,8 @@ type SecretContent map[string]map[string][]byte
 
 // CacheMock ...
 type CacheMock struct {
+	GlobalCfg     map[string]string
+	IngList       []*extensions.Ingress
 	SvcList       []*api.Service
 	EpList        map[string]*api.Endpoints
 	TermPodList   map[string][]*api.Pod
@@ -60,6 +63,16 @@ func (c *CacheMock) buildSecretName(defaultNamespace, secretName string) string 
 		return secretName
 	}
 	return defaultNamespace + "/" + secretName
+}
+
+// GetIngress ...
+func (c *CacheMock) GetIngress(ingressName string) (*extensions.Ingress, error) {
+	return nil, nil
+}
+
+// GetIngressList ...
+func (c *CacheMock) GetIngressList() ([]*extensions.Ingress, error) {
+	return c.IngList, nil
 }
 
 // GetService ...
@@ -157,4 +170,43 @@ func (c *CacheMock) GetSecretContent(defaultNamespace, secretName, keyName strin
 		return nil, fmt.Errorf("secret '%s' does not have file/key '%s'", fullname, keyName)
 	}
 	return nil, fmt.Errorf("secret not found: '%s'", fullname)
+}
+
+// NeedResync ...
+func (c *CacheMock) NeedResync() bool {
+	return true
+}
+
+// GlobalConfig ...
+func (c *CacheMock) GlobalConfig() (cur, dirty map[string]string) {
+	return c.GlobalCfg, nil
+}
+
+// GetDirtyIngresses ...
+func (c *CacheMock) GetDirtyIngresses() (del, upd, add []*extensions.Ingress) {
+	return nil, nil, nil
+}
+
+// GetDirtyEndpoints ...
+func (c *CacheMock) GetDirtyEndpoints() []*api.Endpoints {
+	return nil
+}
+
+// GetDirtyServices ...
+func (c *CacheMock) GetDirtyServices() (del, upd, add []*api.Service) {
+	return nil, nil, nil
+}
+
+// GetDirtySecrets ...
+func (c *CacheMock) GetDirtySecrets() (del, upd, add []*api.Secret) {
+	return nil, nil, nil
+}
+
+// GetDirtyPods ...
+func (c *CacheMock) GetDirtyPods() []*api.Pod {
+	return nil
+}
+
+// SyncNewObjects ...
+func (c *CacheMock) SyncNewObjects() {
 }

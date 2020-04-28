@@ -58,6 +58,11 @@ func (h *Hosts) FindHost(hostname string) *Host {
 	return h.itemsmap[hostname]
 }
 
+// RemoveAll ...
+func (h *Hosts) RemoveAll(hostnames []string) {
+	// IMPLEMENT
+}
+
 func (h *Hosts) createHost(hostname string) *Host {
 	return &Host{
 		Hostname: hostname,

@@ -54,6 +54,12 @@ func (b *Backends) FindBackend(namespace, name, port string) *Backend {
 	return b.itemsmap[buildID(namespace, name, port)]
 }
 
+// RemoveAll ...
+func (b *Backends) RemoveAll([]BackendID) {
+	// IMPLEMENT
+	// rastrear e remover entradas em userlist nao usadas
+}
+
 // DefaultBackend ...
 func (b *Backends) DefaultBackend() *Backend {
 	return b.defaultBackend
@@ -82,6 +88,13 @@ func (b *Backends) sortBackends() {
 		}
 		return b.itemslist[i].ID < b.itemslist[j].ID
 	})
+}
+
+func (b *BackendID) String() string {
+	if b.id == "" {
+		b.id = b.Namespace + "_" + b.Name + "_" + b.Port
+	}
+	return b.id
 }
 
 func createBackend(namespace, name, port string) *Backend {

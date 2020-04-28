@@ -18,6 +18,8 @@ package ingress
 
 import (
 	"fmt"
+	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -35,15 +37,19 @@ import (
 
 // Config ...
 type Config interface {
-	Sync(ingress []*extensions.Ingress)
+	Sync()
 }
 
 // NewIngressConverter ...
-func NewIngressConverter(options *ingtypes.ConverterOptions, haproxy haproxy.Config, globalConfig map[string]string) Config {
+func NewIngressConverter(options *ingtypes.ConverterOptions, haproxy haproxy.Config) Config {
 	if options.DefaultConfig == nil {
 		options.DefaultConfig = createDefaults
 	}
 	defaultConfig := options.DefaultConfig()
+	globalConfig, newConfig := options.Cache.GlobalConfig()
+	if newConfig != nil {
+		globalConfig = newConfig
+	}
 	for key, value := range globalConfig {
 		defaultConfig[key] = value
 	}
@@ -52,6 +58,7 @@ func NewIngressConverter(options *ingtypes.ConverterOptions, haproxy haproxy.Con
 		options:            options,
 		logger:             options.Logger,
 		cache:              options.Cache,
+		tracker:            options.Tracker,
 		mapBuilder:         annotations.NewMapBuilder(options.Logger, options.AnnotationPrefix+"/", defaultConfig),
 		updater:            annotations.NewUpdater(haproxy, options),
 		globalConfig:       annotations.NewMapBuilder(options.Logger, "", defaultConfig).NewMapper(),
@@ -60,7 +67,7 @@ func NewIngressConverter(options *ingtypes.ConverterOptions, haproxy haproxy.Con
 	}
 	haproxy.Frontend().DefaultCert = options.DefaultSSLFile.Filename
 	if options.DefaultBackend != "" {
-		if backend, err := c.addBackend(&annotations.Source{}, "*/", options.DefaultBackend, "", map[string]string{}); err == nil {
+		if backend, err := c.addBackend(&annotations.Source{}, "*", "/", options.DefaultBackend, "", map[string]string{}); err == nil {
 			haproxy.Backends().SetDefaultBackend(backend)
 		} else {
 			c.logger.Error("error reading default service: %v", err)
@@ -74,6 +81,7 @@ type converter struct {
 	options            *ingtypes.ConverterOptions
 	logger             types.Logger
 	cache              convtypes.Cache
+	tracker            convtypes.Tracker
 	mapBuilder         *annotations.MapBuilder
 	updater            annotations.Updater
 	globalConfig       *annotations.Mapper
@@ -81,11 +89,160 @@ type converter struct {
 	backendAnnotations map[*hatypes.Backend]*annotations.Mapper
 }
 
-func (c *converter) Sync(ingress []*extensions.Ingress) {
-	for _, ing := range ingress {
-		c.syncIngress(ing)
+func (c *converter) Sync() {
+	globalConfig, newConfig := c.cache.GlobalConfig()
+	// IMPLEMENT
+	// config option to allow partial parsing
+	// cache also need to know if partial parsing is enabled
+	needResync := true || c.cache.NeedResync() || globalConfigNeedFullSync(globalConfig, newConfig)
+	if needResync {
+		c.syncFull()
+	} else {
+		c.syncPartial()
 	}
 	c.syncAnnotations()
+}
+
+func globalConfigNeedFullSync(cur, new map[string]string) bool {
+	// Currently if a global is changed, all the ingress objects are parsed again.
+	// This need to be done due to:
+	//
+	//   1. Default host and backend annotations. If a default value
+	//      changes, such default may impact any ingress object;
+	//   2. At the time of this writing, the following global
+	//      configuration keys are used during annotation parsing:
+	//        * GlobalDNSResolvers
+	//        * GlobalDrainSupport
+	//        * GlobalNoTLSRedirectLocations
+	//
+	// This might be improved after implement a way to guarantee that a global
+	// is just a haproxy global, default or frontend config.
+	return new != nil && !reflect.DeepEqual(cur, new)
+}
+
+func (c *converter) syncFull() {
+	c.haproxy.Clear()
+	ingList, err := c.cache.GetIngressList()
+	if err != nil {
+		c.logger.Error("error reading ingress list: %v", err)
+		return
+	}
+	sortIngress(ingList)
+	for _, ing := range ingList {
+		c.syncIngress(ing)
+	}
+}
+
+func (c *converter) syncPartial() {
+	// conventions:
+	//
+	//   * del, upd, add: events from the listers
+	//   * old, new:      old state (deleted, before change) and new state (after change, added)
+	//   * dirty:         has an impact due to a direct or indirect change
+	//
+
+	// helper funcs
+	ing2names := func(ings []*extensions.Ingress) []string {
+		inglist := make([]string, len(ings))
+		for i, ing := range ings {
+			inglist[i] = ing.Namespace + "/" + ing.Name
+		}
+		return inglist
+	}
+	svc2names := func(services []*api.Service) []string {
+		serviceList := make([]string, len(services))
+		for i, service := range services {
+			serviceList[i] = service.Namespace + "/" + service.Name
+		}
+		return serviceList
+	}
+	secret2names := func(secrets []*api.Secret) []string {
+		secretList := make([]string, len(secrets))
+		for i, secret := range secrets {
+			secretList[i] = secret.Namespace + "/" + secret.Name
+		}
+		return secretList
+	}
+
+	// changed objects
+	delIngs, updIngs, addIngs := c.cache.GetDirtyIngresses()
+	endpoints := c.cache.GetDirtyEndpoints()
+	delSvcs, updSvcs, addSvcs := c.cache.GetDirtyServices()
+	delSecrets, updSecrets, addSecrets := c.cache.GetDirtySecrets()
+	pods := c.cache.GetDirtyPods()
+	c.cache.SyncNewObjects()
+
+	// remove changed/deleted data
+	delIngNames := ing2names(delIngs)
+	updIngNames := ing2names(updIngs)
+	oldIngNames := append(delIngNames, updIngNames...)
+	delSvcNames := svc2names(delSvcs)
+	updSvcNames := svc2names(updSvcs)
+	addSvcNames := svc2names(addSvcs)
+	oldSvcNames := append(delSvcNames, updSvcNames...)
+	delSecretNames := secret2names(delSecrets)
+	updSecretNames := secret2names(updSecrets)
+	addSecretNames := secret2names(addSecrets)
+	oldSecretNames := append(delSecretNames, updSecretNames...)
+	dirtyIngs, dirtyHosts, dirtyBacks :=
+		c.tracker.GetDirtyLinks(oldIngNames, oldSvcNames, addSvcNames, oldSecretNames, addSecretNames)
+	c.haproxy.Hosts().RemoveAll(dirtyHosts)
+	c.haproxy.Backends().RemoveAll(dirtyBacks)
+	c.tracker.DeleteHostnames(dirtyHosts)
+	c.tracker.DeleteBackends(dirtyBacks)
+
+	// merge dirty and added ingress objects into a single list
+	ingMap := make(map[string]*extensions.Ingress)
+	for _, ing := range dirtyIngs {
+		ingMap[ing] = nil
+	}
+	for _, ing := range delIngNames {
+		delete(ingMap, ing)
+	}
+	for _, ing := range addIngs {
+		ingMap[ing.Namespace+"/"+ing.Name] = ing
+	}
+	ingList := make([]*extensions.Ingress, 0, len(ingMap))
+	for name, ing := range ingMap {
+		if ing == nil {
+			var err error
+			ing, err = c.cache.GetIngress(name)
+			if err != nil {
+				c.logger.Warn("ignoring ingress '%s': %v", name, err)
+				ing = nil
+			}
+		}
+		if ing != nil {
+			ingList = append(ingList, ing)
+		}
+	}
+
+	// reinclude changed/added data
+	sortIngress(ingList)
+	for _, ing := range ingList {
+		c.syncIngress(ing)
+	}
+	for _, ep := range endpoints {
+		if err := c.applyEndpoints(ep); err != nil {
+			c.logger.Warn("skipping apply endpoint '%s/%s' update: %v", ep.Namespace, ep.Name, err)
+		}
+	}
+	if c.globalConfig.Get(ingtypes.GlobalDrainSupport).Bool() {
+		for _, pod := range pods {
+			c.applyPod(pod)
+		}
+	}
+}
+
+func sortIngress(ingress []*extensions.Ingress) {
+	sort.Slice(ingress, func(i, j int) bool {
+		i1 := ingress[i]
+		i2 := ingress[j]
+		if i1.CreationTimestamp != i2.CreationTimestamp {
+			return i1.CreationTimestamp.Before(&i2.CreationTimestamp)
+		}
+		return i1.Namespace+"/"+i1.Name < i2.Namespace+"/"+i2.Name
+	})
 }
 
 func (c *converter) syncIngress(ing *extensions.Ingress) {
@@ -123,7 +280,7 @@ func (c *converter) syncIngress(ing *extensions.Ingress) {
 			}
 			svcName, svcPort := readServiceNamePort(&path.Backend)
 			fullSvcName := ing.Namespace + "/" + svcName
-			backend, err := c.addBackend(source, hostname+uri, fullSvcName, svcPort, annBack)
+			backend, err := c.addBackend(source, hostname, uri, fullSvcName, svcPort, annBack)
 			if err != nil {
 				c.logger.Warn("skipping backend config of ingress '%s': %v", fullIngName, err)
 				continue
@@ -132,7 +289,7 @@ func (c *converter) syncIngress(ing *extensions.Ingress) {
 			sslpassthrough, _ := strconv.ParseBool(annHost[ingtypes.HostSSLPassthrough])
 			sslpasshttpport := annHost[ingtypes.HostSSLPassthroughHTTPPort]
 			if sslpassthrough && sslpasshttpport != "" {
-				if _, err := c.addBackend(source, hostname+uri, fullSvcName, sslpasshttpport, annBack); err != nil {
+				if _, err := c.addBackend(source, hostname, uri, fullSvcName, sslpasshttpport, annBack); err != nil {
 					c.logger.Warn("skipping http port config of ssl-passthrough on %v: %v", source, err)
 				}
 			}
@@ -140,7 +297,7 @@ func (c *converter) syncIngress(ing *extensions.Ingress) {
 		for _, tls := range ing.Spec.TLS {
 			for _, tlshost := range tls.Hosts {
 				if tlshost == hostname {
-					tlsPath := c.addTLS(source, tls.SecretName)
+					tlsPath := c.addTLS(source, tlshost, tls.SecretName)
 					if host.TLS.TLSHash == "" {
 						host.TLS.TLSFilename = tlsPath.Filename
 						host.TLS.TLSHash = tlsPath.SHA1Hash
@@ -200,7 +357,7 @@ func (c *converter) addDefaultHostBackend(source *annotations.Source, fullSvcNam
 			return fmt.Errorf("path %s was already defined on default host", uri)
 		}
 	}
-	backend, err := c.addBackend(source, hostname+uri, fullSvcName, svcPort, annBack)
+	backend, err := c.addBackend(source, hostname, uri, fullSvcName, svcPort, annBack)
 	if err != nil {
 		return err
 	}
@@ -210,7 +367,9 @@ func (c *converter) addDefaultHostBackend(source *annotations.Source, fullSvcNam
 }
 
 func (c *converter) addHost(hostname string, source *annotations.Source, ann map[string]string) *hatypes.Host {
+	// TODO build a stronger tracking
 	host := c.haproxy.Hosts().AcquireHost(hostname)
+	c.tracker.TrackHostname(convtypes.IngressType, source.FullName(), hostname)
 	mapper, found := c.hostAnnotations[host]
 	if !found {
 		mapper = c.mapBuilder.NewMapper()
@@ -223,11 +382,14 @@ func (c *converter) addHost(hostname string, source *annotations.Source, ann map
 	return host
 }
 
-func (c *converter) addBackend(source *annotations.Source, hostpath, fullSvcName, svcPort string, ann map[string]string) (*hatypes.Backend, error) {
+func (c *converter) addBackend(source *annotations.Source, hostname, uri, fullSvcName, svcPort string, ann map[string]string) (*hatypes.Backend, error) {
+	// TODO build a stronger tracking
 	svc, err := c.cache.GetService(fullSvcName)
 	if err != nil {
+		c.tracker.TrackMissingOnHostname(convtypes.ServiceType, fullSvcName, hostname)
 		return nil, err
 	}
+	c.tracker.TrackHostname(convtypes.ServiceType, fullSvcName, hostname)
 	ssvcName := strings.Split(fullSvcName, "/")
 	namespace := ssvcName[0]
 	svcName := ssvcName[1]
@@ -241,6 +403,8 @@ func (c *converter) addBackend(source *annotations.Source, hostpath, fullSvcName
 		return nil, fmt.Errorf("port not found: '%s'", svcPort)
 	}
 	backend := c.haproxy.Backends().AcquireBackend(namespace, svcName, port.TargetPort.String())
+	c.tracker.TrackBackend(convtypes.IngressType, source.FullName(), backend.BackendID())
+	hostpath := hostname + uri
 	mapper, found := c.backendAnnotations[backend]
 	if !found {
 		// New backend, initialize with service annotations, giving precedence
@@ -285,12 +449,14 @@ func (c *converter) addBackend(source *annotations.Source, hostpath, fullSvcName
 	return backend, nil
 }
 
-func (c *converter) addTLS(source *annotations.Source, secretName string) convtypes.CrtFile {
+func (c *converter) addTLS(source *annotations.Source, hostname, secretName string) convtypes.CrtFile {
 	if secretName != "" {
 		tlsFile, err := c.cache.GetTLSSecretPath(source.Namespace, secretName)
 		if err == nil {
+			c.tracker.TrackHostname(convtypes.SecretType, secretName, hostname)
 			return tlsFile
 		}
+		c.tracker.TrackMissingOnHostname(convtypes.SecretType, secretName, hostname)
 		c.logger.Warn("using default certificate due to an error reading secret '%s' on %s: %v", secretName, source, err)
 	}
 	return c.options.DefaultSSLFile
@@ -325,6 +491,27 @@ func (c *converter) addEndpoints(svc *api.Service, svcPort *api.ServicePort, bac
 		}
 	}
 	return nil
+}
+
+func (c *converter) applyEndpoints(endpoints *api.Endpoints) error {
+	svc, err := c.cache.GetService(fmt.Sprintf("%s/%s", endpoints.Namespace, endpoints.Name))
+	if err != nil {
+		return err
+	}
+	for _, port := range svc.Spec.Ports {
+		backend := c.haproxy.Backends().FindBackend(endpoints.Namespace, endpoints.Name, port.TargetPort.String())
+		if backend != nil {
+			backend.ClearEndpoints()
+			if err := c.addEndpoints(svc, &port, backend); err != nil {
+				c.logger.Warn("skipping backend '%s' update: %v", backend.ID, err)
+			}
+		}
+	}
+	return nil
+}
+
+func (c *converter) applyPod(pod *api.Pod) {
+	// IMPLEMENT
 }
 
 func (c *converter) readAnnotations(annotations map[string]string) (annHost, annBack map[string]string) {

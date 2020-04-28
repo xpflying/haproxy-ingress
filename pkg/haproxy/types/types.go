@@ -363,11 +363,20 @@ type Backends struct {
 	defaultBackend *Backend
 }
 
+// BackendID ...
+type BackendID struct {
+	id        string
+	Namespace string
+	Name      string
+	Port      string
+}
+
 // Backend ...
 type Backend struct {
 	//
 	// core config
 	//
+	// TODO use BackendID
 	ID        string
 	Namespace string
 	Name      string
