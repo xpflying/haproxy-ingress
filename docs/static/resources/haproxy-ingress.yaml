@@ -165,7 +165,7 @@ spec:
       serviceAccountName: ingress-controller
       containers:
       - name: haproxy-ingress
-        image: quay.io/jcmoraisjr/haproxy-ingress
+        image: quay.io/jcmoraisjr/haproxy-ingress:v0.9
         args:
         - --configmap=ingress-controller/haproxy-ingress
         ports:
