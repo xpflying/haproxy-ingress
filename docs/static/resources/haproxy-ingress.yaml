@@ -136,6 +136,10 @@ kind: ConfigMap
 metadata:
   name: haproxy-ingress
   namespace: ingress-controller
+data:
+  config-defaults: |
+    compression algo gzip
+    compression type text/xml text/plain text/css application/javascript application/x-javascript application/rss+xml application/atom+xml application/xml application/json application/octet-stream
 ---
 apiVersion: apps/v1
 kind: DaemonSet
